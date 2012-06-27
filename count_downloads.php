@@ -1,37 +1,49 @@
 <?php
-// Load WordPress and set domain (needed for WordPress Multi-Site setups)
-$_SERVER['HTTP_HOST'] = "ho.st";
-include '/var/www/wordpress/wp-load.php';
-
 // Open input
 $stdin = fopen('php://stdin', 'r');
+
+// Open database connection
+$db = new Mongo('mongodb://127.0.0.1');
 
 // Process input
 while ( !feof( $stdin ) ):
 	// Parse line
-	if ( preg_match( "^(\+|\-) (.*) \- \[(.*)\] \"(GET|POST) (.*) (.*)\" (\d*) (\d*) \"(.*)\" \"(.*)\"^", trim( fgets( $stdin ) ), $parts ) ):
-		// Check for bot
-		if ( false !== strpos( strtolower( $parts[10] ), "bot" ) ) continue;
+	if ( preg_match( "/(.*) \[(.*)\] \'GET (.*) (.*)\' (\d*) (\d*) \'(.*)\' \'(.*)\'/is", trim( fgets( $stdin ) ), $parts ) ):
+		// Check if it's a 200 (OK) or 206 (Partial Content) request
+		if ( false == in_array( (int) $parts[5], array( 200, 206 ) ) ) continue;
 		
-		// Check if status is between 200 and 299
-		if ( false == ( $parts[7] > 199 && $parts[7] < 300 ) ) continue;
+		// Check if it's a audio file
+		$episode = pathinfo($parts[3]);
+		if ( false == in_array( $episode['extension'], array( "mp3", "ogg", "m4a" ) ) ) continue;
+
+		// Don't track PritTorrent
+		if ( "85.10.246.236" == $parts[1] || "-" == $parts[8] ) continue;
+
+		// Build query
+		$query = array(
+			'episode' => $episode['filename'],
+			'type' => $episode['extension'],
+			'ip' => md5($parts[1]),
+			'user_agent' => $parts[8],
+			'downloaded_at' => array('$gte' => new MongoDate(time() - (60*60*6)))
+		);
 		
-		// Get show id
-		if ( preg_match( "^\(.*)\.(mp3|m4a|ogg)^", $parts[5], $show_id ) ):
-			// Get post id
-			$post_id = $wpdb->get_var($wpdb->prepare("SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = 'audio' AND meta_value = %s", $show_id[1]));
-
-			// Meta key
-			$meta_key = ( "+" == $parts[1] ) ? "downloads" : "streams";
-
-			// Update download counter
-			$downloads = (int) get_post_meta($post_id, $meta_key . "_" . $show_id[2], true);
-			update_post_meta($post_id, $meta_key . "_" . $show_id[2], $downloads+1);
-		endif;
+		// Check if this download, on this IP and user agent, has already been tracked
+		if ( null !== $db->podcasts->downloads->findOne( $query ) ) continue;
+		
+		// Track download
+		$db->podcasts->downloads->insert(array(
+			"type" => $episode['extension'],
+			"episode" => $episode['filename'],
+			"downloaded_at" => new MongoDate(),
+			"ip" => md5($parts[1]),
+			"user_agent" => $parts[8],
+		));
 	endif;
 	
 	// Clear
 	unset($parts);
-	unset($show_id);
-	unset($line);
 endwhile;
+
+// Close
+$db->close();
